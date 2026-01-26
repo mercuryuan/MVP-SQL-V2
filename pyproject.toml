@@ -1,0 +1,6 @@
+[project]
+name = "mvp_sql"
+version = "0.1.0"
+[tool.setuptools.packages.find]
+where = ["."]
+# 安装 pip install -e .

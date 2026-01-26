@@ -141,6 +141,7 @@ class NetworkXSchemaParser:
         self.database_file = database_file
         # 核心改动：初始化一个 NetworkX 有向图，而不是 Neo4j Driver
         self.G = nx.DiGraph()
+        self.conn = None
 
     def parse_and_save(self, output_path: str):
         """主入口：解析并保存为 JSON"""
@@ -159,8 +160,9 @@ class NetworkXSchemaParser:
         """
         对应原 parse_and_store_schema，但操作对象是 self.G
         """
-        with sqlite3.connect(self.database_file) as conn:
-            cursor = conn.cursor()
+        self.conn = sqlite3.connect(self.database_file)
+        cursor = self.conn.cursor()
+        try:
 
             # --- 1. 处理表 ---
             cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
@@ -208,6 +210,10 @@ class NetworkXSchemaParser:
 
                     # [NX] 创建外键边
                     self._create_fk_edge_nx(table_name, from_column, to_table, to_column)
+        finally:
+            cursor.close()
+            self.conn.close()
+            self.conn = None
 
     def _create_table_node_nx(self, table_name, row_count):
         """替代原 _create_table_node_in_neo4j"""
@@ -266,10 +272,6 @@ class NetworkXSchemaParser:
                         to_column=to_col,
                         reference_path=fk_path)
 
-    # ---------------------------------------------------------
-    # 下面保留你原有的统计方法，不需要改动逻辑，只需要复制过来即可
-    # ---------------------------------------------------------
-
     def _get_table_row_count(self, table_name):
         """
         获取指定表的数据条数。
@@ -278,11 +280,10 @@ class NetworkXSchemaParser:
         :return: 表的数据条数，如果获取失败返回None
         """
         try:
-            with sqlite3.connect(self.database_file) as conn:
-                cursor = conn.cursor()
-                cursor.execute(f"SELECT COUNT(*) FROM {quote_identifier(table_name)}")
-                row_count = cursor.fetchone()[0]
-                return row_count
+            cursor = self.conn.cursor()
+            cursor.execute(f"SELECT COUNT(*) FROM {quote_identifier(table_name)}")
+            row_count = cursor.fetchone()[0]
+            return row_count
         except Exception as e:
             print(f"获取表 {table_name} 数据条数时出错: {e}")
             return None
@@ -294,11 +295,11 @@ class NetworkXSchemaParser:
         :param table_name: 表名
         :return: 列名列表
         """
-        with sqlite3.connect(self.database_file) as conn:
-            cursor = conn.cursor()
-            cursor.execute(f"PRAGMA table_info({quote_identifier(table_name)})")
-            columns_info = cursor.fetchall()
-            columns = [column_info[1] for column_info in columns_info]
+
+        cursor = self.conn.cursor()
+        cursor.execute(f"PRAGMA table_info({quote_identifier(table_name)})")
+        columns_info = cursor.fetchall()
+        columns = [column_info[1] for column_info in columns_info]
         return columns
 
     def _get_column_samples_and_attributes(self, table_name, column_name, data_type, sample_size=None):
@@ -319,37 +320,36 @@ class NetworkXSchemaParser:
         # 处理数据类型，去除括号及里面的长度限定部分，统一为基础类型名称
         base_data_type = data_type.split('(')[0].upper()
 
-        with sqlite3.connect(self.database_file) as conn:
-            cursor = conn.cursor()
-            # 查询列数据
-            if sample_size is not None:
-                # 如果指定了抽样个数，则限制查询结果
-                query = f"SELECT {quote_identifier(column_name)} FROM {quote_identifier(table_name)} LIMIT {sample_size};"
-            else:
-                # 否则查询全部数据
-                query = f"SELECT {quote_identifier(column_name)} FROM {quote_identifier(table_name)} ;"
+        cursor = self.conn.cursor()
+        # 查询列数据
+        if sample_size is not None:
+            # 如果指定了抽样个数，则限制查询结果
+            query = f"SELECT {quote_identifier(column_name)} FROM {quote_identifier(table_name)} LIMIT {sample_size};"
+        else:
+            # 否则查询全部数据
+            query = f"SELECT {quote_identifier(column_name)} FROM {quote_identifier(table_name)} ;"
 
-            try:
-                cursor.execute(query)
-                rows = cursor.fetchall()
-                all_values = [row[0] for row in rows]
-            except sqlite3.OperationalError as e:
-                print(f"警告：读取 {table_name}.{column_name} 失败，尝试使用 bytes 方式处理，错误信息：{e}")
+        try:
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            all_values = [row[0] for row in rows]
+        except sqlite3.OperationalError as e:
+            print(f"警告：读取 {table_name}.{column_name} 失败，尝试使用 bytes 方式处理，错误信息：{e}")
 
-                # 重新连接，并使用 text_factory=bytes
-                with sqlite3.connect(self.database_file) as conn_fallback:
-                    conn_fallback.text_factory = bytes
-                    cursor_fallback = conn_fallback.cursor()
-                    cursor_fallback.execute(query)
-                    rows = cursor_fallback.fetchall()
+            # 重新连接，并使用 text_factory=bytes
+            with sqlite3.connect(self.database_file) as conn_fallback:
+                conn_fallback.text_factory = bytes
+                cursor_fallback = conn_fallback.cursor()
+                cursor_fallback.execute(query)
+                rows = cursor_fallback.fetchall()
 
-                    # 逐行处理可能的 bytes 数据
-                    all_values = []
-                    for row in rows:
-                        value = row[0]
-                        if isinstance(value, bytes):
-                            value = value.decode('utf-8', errors='ignore')  # 忽略无法解码的字符
-                        all_values.append(value)
+                # 逐行处理可能的 bytes 数据
+                all_values = []
+                for row in rows:
+                    value = row[0]
+                    if isinstance(value, bytes):
+                        value = value.decode('utf-8', errors='ignore')  # 忽略无法解码的字符
+                    all_values.append(value)
 
             # 过滤空值（包括 None、空字符串和仅含空格的字符串）
             def is_empty(value):
@@ -479,16 +479,15 @@ class NetworkXSchemaParser:
         :return: 主键列名列表，如果是单个主键则返回只包含该列名的列表，无主键返回空列表
         """
         try:
-            with sqlite3.connect(self.database_file) as conn:
-                cursor = conn.cursor()
-                sql_statement = f"PRAGMA table_info({quote_identifier(table_name)})"
-                cursor.execute(sql_statement)
-                columns_info = cursor.fetchall()
-                primary_key_columns = []
-                for column_info in columns_info:
-                    if column_info[5] != 0:  # 假设第 6 个元素（索引为 5）表示是否为主键，1 为主键，0 为非主键，不同数据库该位置可能不同
-                        primary_key_columns.append(column_info[1])  # 第 2 个元素（索引为 1）是列名
-                return primary_key_columns
+            cursor = self.conn.cursor()
+            sql_statement = f"PRAGMA table_info({quote_identifier(table_name)})"
+            cursor.execute(sql_statement)
+            columns_info = cursor.fetchall()
+            primary_key_columns = []
+            for column_info in columns_info:
+                if column_info[5] != 0:  # 假设第 6 个元素（索引为 5）表示是否为主键，1 为主键，0 为非主键，不同数据库该位置可能不同
+                    primary_key_columns.append(column_info[1])  # 第 2 个元素（索引为 1）是列名
+            return primary_key_columns
         except sqlite3.Error as e:
             print(f"Error occurred while executing SQL statement: {sql_statement}")
             print(f"Error message: {e}")
@@ -502,13 +501,13 @@ class NetworkXSchemaParser:
         :return: 外键列名列表，如果是单个外键则返回只包含该列名的列表，无外键返回空列表
         """
         try:
-            with sqlite3.connect(self.database_file) as conn:
-                cursor = conn.cursor()
-                sql_statement = f"PRAGMA foreign_key_list({quote_identifier(table_name)})"
-                cursor.execute(sql_statement)
-                foreign_keys = cursor.fetchall()
-                foreign_key_columns = [fk[3] for fk in foreign_keys]  # 第 4 个元素（索引为 3）是本地列名，对应外键列
-                return foreign_key_columns
+
+            cursor = self.conn.cursor()
+            sql_statement = f"PRAGMA foreign_key_list({quote_identifier(table_name)})"
+            cursor.execute(sql_statement)
+            foreign_keys = cursor.fetchall()
+            foreign_key_columns = [fk[3] for fk in foreign_keys]  # 第 4 个元素（索引为 3）是本地列名，对应外键列
+            return foreign_key_columns
         except sqlite3.Error as e:
             print(f"Error occurred while executing SQL statement: {sql_statement}")
             print(f"Error message: {e}")
@@ -522,14 +521,14 @@ class NetworkXSchemaParser:
         :param column_name: 列名
         :return: True 表示列可为空，False 表示列不允许为空
         """
-        with sqlite3.connect(self.database_file) as conn:
-            cursor = conn.cursor()
-            cursor.execute(f"PRAGMA table_info({quote_identifier(table_name)})")
-            columns_info = cursor.fetchall()
-            for column_info in columns_info:
-                if column_info[1] == column_name:  # 第2个元素（索引为1）是列名
-                    notnull = column_info[3]  # 第4个元素（索引为3）表示是否允许为空，0 表示允许为空，1 表示不允许为空
-                    return not notnull  # 当 notnull 为 0 时返回 True，为 1 时返回 False
+
+        cursor = self.conn.cursor()
+        cursor.execute(f"PRAGMA table_info({quote_identifier(table_name)})")
+        columns_info = cursor.fetchall()
+        for column_info in columns_info:
+            if column_info[1] == column_name:  # 第2个元素（索引为1）是列名
+                notnull = column_info[3]  # 第4个元素（索引为3）表示是否允许为空，0 表示允许为空，1 表示不允许为空
+                return not notnull  # 当 notnull 为 0 时返回 True，为 1 时返回 False
         return None
 
     def _is_primary_key(self, table_name, column_name):
@@ -540,13 +539,13 @@ class NetworkXSchemaParser:
         :param column_name: 列名
         :return: True如果是主键，False否则
         """
-        with sqlite3.connect(self.database_file) as conn:
-            cursor = conn.cursor()
-            cursor.execute(f"PRAGMA table_info({quote_identifier(table_name)})")
-            columns_info = cursor.fetchall()
-            for column_info in columns_info:
-                if column_info[1] == column_name:  # 第2个元素（索引为1）是列名
-                    return bool(column_info[5])  # 第6个元素（索引为5）表示是否为主键，1为主键，0为非主键，不同数据库该位置可能不同
+
+        cursor = self.conn.cursor()
+        cursor.execute(f"PRAGMA table_info({quote_identifier(table_name)})")
+        columns_info = cursor.fetchall()
+        for column_info in columns_info:
+            if column_info[1] == column_name:  # 第2个元素（索引为1）是列名
+                return bool(column_info[5])  # 第6个元素（索引为5）表示是否为主键，1为主键，0为非主键，不同数据库该位置可能不同
         return False
 
     def _is_foreign_key(self, table_name, column_name):
@@ -557,13 +556,13 @@ class NetworkXSchemaParser:
         :param column_name: 列名
         :return: True如果是外键，False否则
         """
-        with sqlite3.connect(self.database_file) as conn:
-            cursor = conn.cursor()
-            cursor.execute(f"PRAGMA foreign_key_list({quote_identifier(table_name)})")
-            foreign_keys = cursor.fetchall()
-            for foreign_key in foreign_keys:
-                if foreign_key[3] == column_name:  # 第4个元素（索引为3）是本地列名，对应外键列
-                    return True
+
+        cursor = self.conn.cursor()
+        cursor.execute(f"PRAGMA foreign_key_list({quote_identifier(table_name)})")
+        foreign_keys = cursor.fetchall()
+        for foreign_key in foreign_keys:
+            if foreign_key[3] == column_name:  # 第4个元素（索引为3）是本地列名，对应外键列
+                return True
         return False
 
     def _get_word_frequency(self, values, top_k=10, by_word=False):

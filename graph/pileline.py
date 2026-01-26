@@ -157,10 +157,10 @@ class SchemaPipeline:
 # --- 使用示例 (对应原代码的 main 部分) ---
 if __name__ == "__main__":
     # 配置路径
-    # database_file = "../data/spider/medicine_enzyme_interaction.sqlite"
-    # output_graph_file = "./output/spider/sfda/medicine_enzyme_interaction.pkl"
-    database_file = "../data/bird/european_football_1/european_football_1.sqlite"
-    output_graph_file = "./output/bird/european_football_1/european_football_1.pkl"
+    database_file = "../data/spider/medicine_enzyme_interaction.sqlite"
+    output_graph_file = "./output/spider/sfda/medicine_enzyme_interaction.pkl"
+    # database_file = "../data/bird/european_football_1/european_football_1.sqlite"
+    # output_graph_file = "./output/bird/european_football_1/european_football_1.pkl"
 
     # 运行 Pipeline
     pipeline = SchemaPipeline(database_file, output_graph_file)
@@ -173,3 +173,6 @@ if __name__ == "__main__":
     # 打印所有节点详细信息
     for node in G.nodes:
         print(G.nodes[node])
+    # 打印所有边详细信息
+    for edge in G.edges:
+        print(G.edges[edge])

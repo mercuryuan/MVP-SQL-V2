@@ -211,6 +211,7 @@ class NetworkXSchemaParser:
                     # [NX] 创建外键边
                     self._create_fk_edge_nx(table_name, from_column, to_table, to_column)
         finally:
+
             cursor.close()
             self.conn.close()
             self.conn = None
